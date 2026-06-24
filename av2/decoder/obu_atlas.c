@@ -11,6 +11,8 @@
  */
 
 #include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "config/avm_config.h"
 #include "avm_dsp/bitreader_buffer.h"
@@ -301,11 +303,29 @@ uint32_t av2_read_atlas_segment_info_obu(struct AV2Decoder *pbi,
     atlas_params->ats_nominal_width_minus1 = avm_rb_read_uvlc(rb);
     atlas_params->ats_nominal_height_minus1 = avm_rb_read_uvlc(rb);
   } else if (atlas_params->atlas_segment_mode_idc == MULTISTREAM_ATLAS) {
+    // A multistream atlas is a global construct and must be carried at
+    // GLOBAL_XLAYER_ID. Reject any other xlayer as a non-conformant bitstream.
+    if (obu_xLayer_id != GLOBAL_XLAYER_ID) {
+      avm_internal_error(
+          &pbi->common.error, AVM_CODEC_UNSUP_BITSTREAM,
+          "MULTISTREAM_ATLAS must be signaled at GLOBAL_XLAYER_ID (%d), but "
+          "was received at xlayer_id %d",
+          GLOBAL_XLAYER_ID, obu_xLayer_id);
+    }
     read_ats_multistream_atlas_info(pbi, atlas_params->ats_basic_info,
                                     obu_xLayer_id, xAId, rb);
     num_segments =
         atlas_params->ats_basic_info->ats_num_atlas_segments_minus_1 + 1;
   } else if (atlas_params->atlas_segment_mode_idc == MULTISTREAM_ALPHA_ATLAS) {
+    // A multistream (alpha) atlas is a global construct and must be carried at
+    // GLOBAL_XLAYER_ID. Reject any other xlayer as a non-conformant bitstream.
+    if (obu_xLayer_id != GLOBAL_XLAYER_ID) {
+      avm_internal_error(
+          &pbi->common.error, AVM_CODEC_UNSUP_BITSTREAM,
+          "MULTISTREAM_ALPHA_ATLAS must be signaled at GLOBAL_XLAYER_ID (%d), "
+          "but was received at xlayer_id %d",
+          GLOBAL_XLAYER_ID, obu_xLayer_id);
+    }
     read_ats_multistream_alpha_atlas_info(pbi, atlas_params->ats_basic_info,
                                           rb);
     num_segments =
@@ -331,5 +351,17 @@ uint32_t av2_read_atlas_segment_info_obu(struct AV2Decoder *pbi,
   if (av2_check_trailing_bits(pbi, rb) != 0) {
     return 0;
   }
+
+  // Persist the most-recent multistream atlas (carried at GLOBAL_XLAYER_ID) so
+  // the Annex D compose path keeps using it across temporal units even when the
+  // atlas OBU is signaled only once (e.g. in the first TU) and not repeated.
+  // MULTISTREAM_ALPHA_ATLAS is included only for the alpha-disabled case; the
+  // alpha-enabled case has already raised an error above.
+  if ((atlas_params->atlas_segment_mode_idc == MULTISTREAM_ATLAS ||
+       atlas_params->atlas_segment_mode_idc == MULTISTREAM_ALPHA_ATLAS) &&
+      obu_xLayer_id == GLOBAL_XLAYER_ID) {
+    pbi->active_multistream_atlas = atlas_params;
+  }
+
   return ((rb->bit_offset - saved_bit_offset + 7) >> 3);
 }
