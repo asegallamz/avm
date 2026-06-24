@@ -858,6 +858,7 @@ if(ENABLE_TOOLS)
       "${AVM_GEN_SRC_DIR}/usage_exit.cc"
       "${AVM_ROOT}/tools/stream_mux.h"
       "${AVM_ROOT}/tools/stream_multiplexer.cc"
+      "${AVM_ROOT}/tools/multistream_atlas_json.h"
       $<TARGET_OBJECTS:avm_common_app_util>
       $<TARGET_OBJECTS:avm_decoder_app_util>)
 
