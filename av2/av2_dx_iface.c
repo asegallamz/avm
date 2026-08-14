@@ -1224,6 +1224,30 @@ static void copy_frame_hash_metadata_to_img(
   }
 }
 
+// Applies film grain to a single Annex D segment's source frame, if that
+// frame carries grain params and grain is not globally disabled. On success,
+// returns either the original buffer unchanged (no grain to apply) or
+// grain_yv12 wrapping a freshly synthesized grained copy; the original
+// RefCntBuffer is never mutated in place, since it may still be a live
+// reference frame or the annex_d_last_frame cache entry for its xlayer.
+// Returns NULL on grain-synthesis allocation failure.
+static YV12_BUFFER_CONFIG *apply_segment_grain(avm_codec_alg_priv_t *ctx,
+                                               AV2Decoder *pbi,
+                                               RefCntBuffer *rb,
+                                               YV12_BUFFER_CONFIG *grain_yv12) {
+  avm_film_grain_t grain_params = rb->film_grain_params;
+  if (pbi->skip_film_grain) grain_params.apply_grain = 0;
+  if (!grain_params.apply_grain) return &rb->buf;
+
+  avm_image_t src_img, grain_img;
+  yuvconfig2image(&src_img, &rb->buf, NULL);
+  if (add_grain_if_needed(ctx, &src_img, &grain_img, &grain_params) == NULL)
+    return NULL;
+  image2yuvconfig(&grain_img, grain_yv12);
+  grain_yv12->bit_depth = grain_img.bit_depth;
+  return grain_yv12;
+}
+
 // Composes all extended-layer frames of the next temporal unit into a single
 // canvas frame (Annex D). Consumes the whole TU from the output queue and
 // returns one composite image, or NULL when the queue is exhausted.
@@ -1268,18 +1292,29 @@ static avm_image_t *compose_annex_d_frame(avm_codec_alg_priv_t *ctx,
   int tex_count = 0;
   int tex_subX = 0, tex_subY = 0, tex_mono = 0, tex_bd_max = 0;
   int chroma_mismatch = 0;
+  // Backing storage for any per-segment grained copies; must outlive the
+  // av2_annex_d_compose_tu() call below since seg_src[] may point into it.
+  YV12_BUFFER_CONFIG grain_yv12[MAX_NUM_ATLAS_SEGMENTS];
   for (int i = 0; i < num_seg && i < MAX_NUM_ATLAS_SEGMENTS; ++i) {
     const int stream = bi->ats_input_stream_id[i];
-    YV12_BUFFER_CONFIG *src = NULL;
+    RefCntBuffer *rb = NULL;
     for (size_t k = start; k < end; ++k) {
       if (pbi->output_frames[k]->xlayer_id == stream) {
-        src = &pbi->output_frames[k]->buf;
+        rb = pbi->output_frames[k];
         break;
       }
     }
-    if (src == NULL && stream >= 0 && stream < MAX_NUM_XLAYERS &&
+    if (rb == NULL && stream >= 0 && stream < MAX_NUM_XLAYERS &&
         pbi->annex_d_last_frame[stream] != NULL) {
-      src = &pbi->annex_d_last_frame[stream]->buf;
+      rb = pbi->annex_d_last_frame[stream];
+    }
+    YV12_BUFFER_CONFIG *src = NULL;
+    if (rb != NULL) {
+      src = apply_segment_grain(ctx, pbi, rb, &grain_yv12[i]);
+      if (src == NULL) {
+        avm_internal_error(&pbi->common.error, AVM_CODEC_MEM_ERROR,
+                           "Failed to apply film grain to atlas segment");
+      }
     }
     seg_src[i] = src;
     if (src != NULL) {
